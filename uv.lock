@@ -532,12 +532,10 @@ version = "0.1.0"
 source = { editable = "." }
 
 [package.dev-dependencies]
-build = [
-    { name = "pyinstaller" },
-]
 dev = [
     { name = "pip-audit" },
     { name = "pre-commit" },
+    { name = "pyinstaller" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -547,10 +545,10 @@ dev = [
 [package.metadata]
 
 [package.metadata.requires-dev]
-build = [{ name = "pyinstaller", specifier = ">=6.22.3" }]
 dev = [
     { name = "pip-audit", specifier = ">=2.10.1" },
     { name = "pre-commit", specifier = ">=4.7.0" },
+    { name = "pyinstaller", specifier = ">=6.22.3" },
     { name = "pyright", specifier = ">=1.1.414" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
