@@ -1,4 +1,4 @@
-.PHONY: setup dev test lint format typecheck check audit
+.PHONY: setup dev build test lint format typecheck check audit
 
 setup:
 	uv sync
@@ -6,6 +6,9 @@ setup:
 
 dev:
 	uv run python -m pc_loan_discount
+
+build:
+	uv run pyinstaller --onefile --windowed --noconfirm --name pc-loan-discount --paths src --specpath build --hidden-import pc_loan_discount.gui src/pc_loan_discount/__main__.py
 
 test:
 	uv run pytest --cov --cov-report=term-missing:skip-covered

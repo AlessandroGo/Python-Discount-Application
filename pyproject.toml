@@ -19,6 +19,7 @@ build-backend = "uv_build"
 dev = [
     "pip-audit>=2.10.1",
     "pre-commit>=4.7.0",
+    "pyinstaller>=6.22.3",
     "pyright>=1.1.414",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
