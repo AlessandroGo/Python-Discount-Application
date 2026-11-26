@@ -12,6 +12,7 @@ Desktop Python application that discounts simple or compound interest loans agai
 All tasks go through `make`. Prefer these over calling tools directly.
 - Setup: `make setup` (required after every clone to sync deps and activate `.githooks/`)
 - Run locally: `make dev`
+- Build standalone executable (`dist/`): `make build`
 - Test (all): `make test`
 - Test (one): `uv run pytest tests/test_calculator.py::test_simple_interest -q`
 - Lint / format: `make lint` / `make format`

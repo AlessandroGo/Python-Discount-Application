@@ -1,23 +1,50 @@
-"""Pure financial discounting, loan schedules, and PC trend valuation engine."""
+"""Pure financial discounting, import tax, loan schedules, and PC trend valuation engine."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
 from pc_loan_discount.models import (
+    CURRENCY_PROFILES,
     AnalysisInputs,
     AnalysisResult,
     ComponentItem,
     ComponentProjection,
     CompoundingFrequency,
+    ImportTaxConfig,
     InterestType,
     MonthlyCashFlow,
+    format_currency,
 )
 
 _BISECTION_STEPS = 60
 _MAX_BREAK_EVEN_RATE_PCT = 500.0
 _MIN_BREAK_EVEN_TREND_PCT = -95.0
 _MAX_BREAK_EVEN_TREND_PCT = 500.0
+
+
+def compute_import_tax(base_value: float, config: ImportTaxConfig) -> float:
+    """Calculate import tax (customs duty + VAT on uplifted ATV) on a base customs value."""
+    if not config.enabled or base_value <= 0.0:
+        return 0.0
+    duty = base_value * (config.customs_duty_pct / 100.0)
+    taxable_value = base_value * (1.0 + config.customs_uplift_pct / 100.0) + duty
+    vat = taxable_value * (config.vat_pct / 100.0)
+    return duty + vat
+
+
+def compute_landed_total(
+    base_total: float,
+    config: ImportTaxConfig,
+    *,
+    shipping_multiplier: float = 1.0,
+) -> tuple[float, float, float]:
+    """Return `(import_tax, shipping_fee, landed_total)` for a build's base customs value."""
+    if not config.enabled:
+        return 0.0, 0.0, base_total
+    tax = compute_import_tax(base_total, config)
+    shipping = config.shipping_and_clearance_fee * shipping_multiplier
+    return tax, shipping, base_total + tax + shipping
 
 
 def validate_inputs(inputs: AnalysisInputs) -> int:
@@ -33,13 +60,28 @@ def validate_inputs(inputs: AnalysisInputs) -> int:
         if item.annual_trend_pct <= -100.0:
             raise ValueError(f"Component '{item.name}' annual trend must be greater than -100%.")
 
-    total_price = sum(item.current_price for item in inputs.components)
-    if total_price <= 0.0:
+    tax = inputs.import_tax
+    if tax.vat_pct < 0.0:
+        raise ValueError("Import VAT percentage cannot be negative.")
+    if tax.customs_uplift_pct < 0.0:
+        raise ValueError("Customs ATV uplift percentage cannot be negative.")
+    if tax.customs_duty_pct < 0.0:
+        raise ValueError("Customs duty percentage cannot be negative.")
+    if tax.shipping_and_clearance_fee < 0.0:
+        raise ValueError("Shipping and clearance fee cannot be negative.")
+
+    if inputs.fx_annual_depreciation_pct <= -100.0:
+        raise ValueError("FX annual depreciation rate must be greater than -100%.")
+
+    base_total = sum(item.current_price for item in inputs.components)
+    if base_total <= 0.0:
         raise ValueError("Total PC build price must be greater than 0.")
+
+    _, _, landed_today = compute_landed_total(base_total, tax)
     if inputs.down_payment < 0.0:
         raise ValueError("Down payment cannot be negative.")
-    if inputs.down_payment > total_price:
-        raise ValueError("Down payment cannot exceed the total PC build price.")
+    if inputs.down_payment > landed_today:
+        raise ValueError("Down payment cannot exceed the landed PC build price.")
     if inputs.loan_annual_rate_pct < 0.0:
         raise ValueError("Loan interest rate cannot be negative.")
     if inputs.term_months < 1:
@@ -275,20 +317,29 @@ def project_components(
     components: tuple[ComponentItem, ...],
     wait_months: int,
     discount_rate_pct: float,
+    import_tax: ImportTaxConfig,
+    fx_annual_depreciation_pct: float,
 ) -> tuple[ComponentProjection, ...]:
-    """Project each component's future nominal and discounted price."""
+    """Project each component's future base, landed (post-tax), and discounted prices."""
     years = wait_months / 12.0
+    fx_factor = (1.0 + fx_annual_depreciation_pct / 100.0) ** years
     projections: list[ComponentProjection] = []
     for item in components:
-        future_price = item.current_price * ((1.0 + item.annual_trend_pct / 100.0) ** years)
-        discounted = discount_to_present(future_price, discount_rate_pct, wait_months)
+        landed_today = item.current_price + compute_import_tax(item.current_price, import_tax)
+        future_base = (
+            item.current_price * ((1.0 + item.annual_trend_pct / 100.0) ** years) * fx_factor
+        )
+        future_landed = future_base + compute_import_tax(future_base, import_tax)
+        discounted = discount_to_present(future_landed, discount_rate_pct, wait_months)
         projections.append(
             ComponentProjection(
                 name=item.name,
-                current_price=item.current_price,
+                base_price_today=item.current_price,
+                landed_price_today=landed_today,
                 annual_trend_pct=item.annual_trend_pct,
-                projected_future_price=future_price,
-                price_change=future_price - item.current_price,
+                projected_base_price=future_base,
+                projected_landed_price=future_landed,
+                price_change=future_landed - landed_today,
                 discounted_future_price=discounted,
             )
         )
@@ -298,8 +349,12 @@ def project_components(
 def _evaluate_net_advantage(inputs: AnalysisInputs) -> float:
     """Fast helper computing net total advantage without recursive break-even solves."""
     wait_months = validate_inputs(inputs)
-    pc_price_today = sum(item.current_price for item in inputs.components)
-    principal = pc_price_today - inputs.down_payment
+    years = wait_months / 12.0
+    fx_factor = (1.0 + inputs.fx_annual_depreciation_pct / 100.0) ** years
+
+    base_today = sum(item.current_price for item in inputs.components)
+    _, _, landed_today = compute_landed_total(base_today, inputs.import_tax)
+    principal = landed_today - inputs.down_payment
 
     schedule = build_loan_schedule(
         principal=principal,
@@ -312,8 +367,20 @@ def _evaluate_net_advantage(inputs: AnalysisInputs) -> float:
     )
     pv_loan_option = inputs.down_payment + sum(row.present_value for row in schedule)
 
-    projections = project_components(inputs.components, wait_months, inputs.discount_rate_pct)
-    pv_wait_option = sum(proj.discounted_future_price for proj in projections)
+    projections = project_components(
+        inputs.components,
+        wait_months,
+        inputs.discount_rate_pct,
+        inputs.import_tax,
+        inputs.fx_annual_depreciation_pct,
+    )
+    future_base_total = sum(proj.projected_base_price for proj in projections)
+    _, _, future_landed_total = compute_landed_total(
+        future_base_total,
+        inputs.import_tax,
+        shipping_multiplier=fx_factor,
+    )
+    pv_wait_option = discount_to_present(future_landed_total, inputs.discount_rate_pct, wait_months)
 
     pv_early_use = sum(
         discount_to_present(inputs.monthly_early_use_value, inputs.discount_rate_pct, month)
@@ -324,8 +391,9 @@ def _evaluate_net_advantage(inputs: AnalysisInputs) -> float:
 
 def find_break_even_loan_rate(inputs: AnalysisInputs) -> float | None:
     """Return the loan APR (%) where taking the loan breaks even with waiting, if in [0, 500]%."""
-    pc_price_today = sum(item.current_price for item in inputs.components)
-    if pc_price_today - inputs.down_payment <= 0.0:
+    base_today = sum(item.current_price for item in inputs.components)
+    _, _, landed_today = compute_landed_total(base_today, inputs.import_tax)
+    if landed_today - inputs.down_payment <= 0.0:
         return None
 
     low = 0.0
@@ -347,7 +415,7 @@ def find_break_even_loan_rate(inputs: AnalysisInputs) -> float | None:
 
 
 def find_break_even_component_trend(inputs: AnalysisInputs) -> float | None:
-    """Return the uniform annual PC price trend (%) needed for the loan to break even."""
+    """Return the uniform global annual PC price trend (%) needed for the loan to break even."""
 
     def with_uniform_trend(trend_pct: float) -> AnalysisInputs:
         uniform = tuple(
@@ -379,9 +447,16 @@ def find_break_even_component_trend(inputs: AnalysisInputs) -> float | None:
 
 
 def analyze_pc_loan(inputs: AnalysisInputs) -> AnalysisResult:
-    """Run the complete discounted loan vs. future PC component cost analysis."""
+    """Run the complete discounted loan vs. future landed PC cost analysis."""
     wait_months = validate_inputs(inputs)
-    pc_price_today = sum(item.current_price for item in inputs.components)
+    years = wait_months / 12.0
+    fx_factor = (1.0 + inputs.fx_annual_depreciation_pct / 100.0) ** years
+
+    pc_base_price_today = sum(item.current_price for item in inputs.components)
+    import_tax_today, shipping_today, pc_price_today = compute_landed_total(
+        pc_base_price_today,
+        inputs.import_tax,
+    )
     principal = pc_price_today - inputs.down_payment
 
     schedule = build_loan_schedule(
@@ -404,9 +479,26 @@ def analyze_pc_loan(inputs: AnalysisInputs) -> AnalysisResult:
     )
     monthly_payment = 0.0 if is_lump_sum else schedule[0].payment
 
-    projections = project_components(inputs.components, wait_months, inputs.discount_rate_pct)
-    pc_price_future_nominal = sum(proj.projected_future_price for proj in projections)
-    pv_wait_option = sum(proj.discounted_future_price for proj in projections)
+    projections = project_components(
+        inputs.components,
+        wait_months,
+        inputs.discount_rate_pct,
+        inputs.import_tax,
+        inputs.fx_annual_depreciation_pct,
+    )
+    pc_base_price_future_nominal = sum(proj.projected_base_price for proj in projections)
+    import_tax_future_nominal, shipping_future_nominal, pc_price_future_nominal = (
+        compute_landed_total(
+            pc_base_price_future_nominal,
+            inputs.import_tax,
+            shipping_multiplier=fx_factor,
+        )
+    )
+    pv_wait_option = discount_to_present(
+        pc_price_future_nominal,
+        inputs.discount_rate_pct,
+        wait_months,
+    )
 
     pv_early_use_benefit = sum(
         discount_to_present(inputs.monthly_early_use_value, inputs.discount_rate_pct, month)
@@ -417,15 +509,20 @@ def analyze_pc_loan(inputs: AnalysisInputs) -> AnalysisResult:
     net_total_advantage = net_financial_advantage + pv_early_use_benefit
     nominal_savings_vs_waiting = pc_price_future_nominal - total_outlay_loan_nominal
 
-    years = wait_months / 12.0
     effective_component_cagr_pct = (
         (pc_price_future_nominal / pc_price_today) ** (1.0 / years) - 1.0
     ) * 100.0
 
     break_even_loan_rate_pct = find_break_even_loan_rate(inputs)
     break_even_component_trend_pct = find_break_even_component_trend(inputs)
+    symbol = CURRENCY_PROFILES[inputs.currency].symbol
 
     return AnalysisResult(
+        currency=inputs.currency,
+        currency_symbol=symbol,
+        pc_base_price_today=pc_base_price_today,
+        import_tax_today=import_tax_today,
+        shipping_today=shipping_today,
         pc_price_today=pc_price_today,
         down_payment=inputs.down_payment,
         loan_principal=principal,
@@ -436,6 +533,9 @@ def analyze_pc_loan(inputs: AnalysisInputs) -> AnalysisResult:
         total_interest_nominal=total_interest_nominal,
         total_outlay_loan_nominal=total_outlay_loan_nominal,
         pv_loan_option=pv_loan_option,
+        pc_base_price_future_nominal=pc_base_price_future_nominal,
+        import_tax_future_nominal=import_tax_future_nominal,
+        shipping_future_nominal=shipping_future_nominal,
         pc_price_future_nominal=pc_price_future_nominal,
         pv_wait_option=pv_wait_option,
         pv_early_use_benefit=pv_early_use_benefit,
@@ -443,6 +543,7 @@ def analyze_pc_loan(inputs: AnalysisInputs) -> AnalysisResult:
         net_total_advantage=net_total_advantage,
         nominal_savings_vs_waiting=nominal_savings_vs_waiting,
         effective_component_cagr_pct=effective_component_cagr_pct,
+        effective_import_tax_rate_pct=inputs.import_tax.effective_tax_rate_pct,
         break_even_loan_rate_pct=break_even_loan_rate_pct,
         break_even_component_trend_pct=break_even_component_trend_pct,
         worth_it=net_total_advantage > 0.0,
@@ -453,8 +554,8 @@ def analyze_pc_loan(inputs: AnalysisInputs) -> AnalysisResult:
 
 def format_text_report(inputs: AnalysisInputs, result: AnalysisResult) -> str:
     """Render a concise plain-text summary report for CLI output or export."""
+    cur = result.currency
     verdict = "WORTH IT" if result.worth_it else "NOT WORTH IT"
-    sign = "+" if result.net_total_advantage >= 0.0 else "-"
     be_rate = (
         f"{result.break_even_loan_rate_pct:.2f}%"
         if result.break_even_loan_rate_pct is not None
@@ -467,31 +568,45 @@ def format_text_report(inputs: AnalysisInputs, result: AnalysisResult) -> str:
     )
 
     interest_desc = f"{inputs.interest_type.value} ({inputs.loan_annual_rate_pct:.2f}% APR)"
+    npv_text = format_currency(result.net_total_advantage, cur, signed=True)
+    fin_text = format_currency(result.net_financial_advantage, cur, signed=True)
+
     lines = [
-        "=== PC Loan vs. Wait Discount Analysis ===",
-        f"Verdict: {verdict} ({sign}${abs(result.net_total_advantage):,.2f} Net Present Value)",
+        f"=== PC Loan vs. Wait Discount Analysis ({cur.value}) ===",
+        f"Verdict: {verdict} ({npv_text} Net Present Value)",
         f"  Interest Type:         {interest_desc}",
         f"  Loan Term / Wait:      {result.term_months} mo / {result.wait_months} mo",
         f"  Discount Rate:         {inputs.discount_rate_pct:.2f}%/yr",
+        f"  FX Weakening Rate:     {inputs.fx_annual_depreciation_pct:+.2f}%/yr",
+        f"  Effective Import Tax:  {result.effective_import_tax_rate_pct:.2f}%",
         "",
         "--- Buy Now with Loan ---",
-        f"  PC Price Today:        ${result.pc_price_today:,.2f}",
-        f"  Down Payment / Loan:   ${result.down_payment:,.2f} / ${result.loan_principal:,.2f}",
-        f"  Monthly Payment:       ${result.monthly_payment:,.2f}",
-        f"  Total Interest:        ${result.total_interest_nominal:,.2f}",
-        f"  Total Nominal Outlay:  ${result.total_outlay_loan_nominal:,.2f}",
-        f"  Discounted Cost (PV):  ${result.pv_loan_option:,.2f}",
+        f"  Base PC Cost Today:    {format_currency(result.pc_base_price_today, cur)}",
+        f"  Import Tax Today:      {format_currency(result.import_tax_today, cur)}",
+        f"  Shipping & Clearance:  {format_currency(result.shipping_today, cur)}",
+        f"  Landed PC Cost Today:  {format_currency(result.pc_price_today, cur)}",
+        (
+            f"  Down Payment / Loan:   {format_currency(result.down_payment, cur)} / "
+            f"{format_currency(result.loan_principal, cur)}"
+        ),
+        f"  Monthly Payment:       {format_currency(result.monthly_payment, cur)}",
+        f"  Total Interest:        {format_currency(result.total_interest_nominal, cur)}",
+        f"  Total Nominal Outlay:  {format_currency(result.total_outlay_loan_nominal, cur)}",
+        f"  Discounted Cost (PV):  {format_currency(result.pv_loan_option, cur)}",
         "",
         "--- Wait & Buy Later ---",
-        f"  Blended PC Trend:      {result.effective_component_cagr_pct:+.2f}%/yr",
-        f"  Projected Future Cost: ${result.pc_price_future_nominal:,.2f}",
-        f"  Discounted Cost (PV):  ${result.pv_wait_option:,.2f}",
-        f"  Early-Use Value (PV):  ${result.pv_early_use_benefit:,.2f}",
+        f"  Effective Local Trend: {result.effective_component_cagr_pct:+.2f}%/yr",
+        f"  Future Base Cost:      {format_currency(result.pc_base_price_future_nominal, cur)}",
+        f"  Future Import Tax:     {format_currency(result.import_tax_future_nominal, cur)}",
+        f"  Future Shipping:       {format_currency(result.shipping_future_nominal, cur)}",
+        f"  Future Landed Cost:    {format_currency(result.pc_price_future_nominal, cur)}",
+        f"  Discounted Cost (PV):  {format_currency(result.pv_wait_option, cur)}",
+        f"  Early-Use Value (PV):  {format_currency(result.pv_early_use_benefit, cur)}",
         "",
         "--- Decision Thresholds ---",
-        f"  Financial NPV Diff:    ${result.net_financial_advantage:+,.2f}",
-        f"  Total NPV Diff:        ${result.net_total_advantage:+,.2f}",
+        f"  Financial NPV Diff:    {fin_text}",
+        f"  Total NPV Diff:        {npv_text}",
         f"  Break-Even Loan APR:   {be_rate}",
-        f"  Break-Even PC Trend:   {be_trend}",
+        f"  Break-Even Global %:   {be_trend}",
     ]
     return "\n".join(lines)

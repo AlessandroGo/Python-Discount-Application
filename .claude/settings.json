@@ -2,6 +2,7 @@
   "permissions": {
     "allow": [
       "Bash(make setup*)",
+      "Bash(make build*)",
       "Bash(make test*)",
       "Bash(make lint*)",
       "Bash(make format*)",
