@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make setup*)",
+      "Bash(make test*)",
+      "Bash(make lint*)",
+      "Bash(make format*)",
+      "Bash(make typecheck*)",
+      "Bash(make check*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch)",
+      "Bash(git switch*)",
+      "Bash(git add*)",
+      "Bash(git commit*)"
+    ],
+    "deny": [
+      "Read(*.env*)",
+      "Read(*.pem)",
+      "Read(*.key)",
+      "Bash(*--no-verify*)",
+      "Bash(git commit -n*)",
+      "Bash(*core.hooksPath*)",
+      "Bash(*.git/hooks*)",
+      "Edit(.githooks/**)",
+      "Write(.githooks/**)",
+      "Bash(*SKIP=*)",
+      "Edit(.pre-commit-config.yaml)",
+      "Write(.pre-commit-config.yaml)"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Block pushes to main/master. The one exception is publishing a brand-new repo,
+# when the remote branch doesn't exist yet (remote sha is all zeros).
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master)
+      case "$remote_sha" in
+        *[!0]*)
+          echo "Blocked: direct push to '${remote_ref#refs/heads/}'. Push a feature branch and open a PR." >&2
+          exit 1 ;;
+      esac ;;
+  esac
+done
+exit 0

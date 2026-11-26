@@ -1,0 +1,26 @@
+# ruff runs from the project's own environment, so its version comes only from
+# uv.lock (which Dependabot updates). pre-commit, `make lint` and CI therefore
+# always use the same ruff. Don't switch back to the astral-sh/ruff-pre-commit
+# repo: it pins a second copy of ruff that drifts out of sync.
+# (--no-sync: .githooks/pre-commit already ran `uv run`, which synced the env.)
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run --no-sync ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --no-sync ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+  # gitleaks isn't a Python package, so there's no second copy to drift from.
+  # Dependabot keeps this rev current (the `pre-commit` entry in .github/dependabot.yml).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

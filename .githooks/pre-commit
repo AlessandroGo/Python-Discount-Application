@@ -1,0 +1,17 @@
+#!/bin/sh
+# 1) Block commits on main/master. The very first commit of a new repo is allowed.
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+if git rev-parse --verify -q HEAD >/dev/null; then
+  case "$branch" in
+    main|master)
+      echo "Blocked: don't commit directly to '$branch'. Create a branch: git switch -c feat/<name>" >&2
+      exit 1 ;;
+  esac
+fi
+
+# 2) Fast checks on what's being committed
+if [ -f .pre-commit-config.yaml ]; then
+  uv run pre-commit run || exit 1     # Python projects: ruff + gitleaks on staged files
+elif [ -f Makefile ]; then
+  make lint || exit 1                 # everything else: the project's own linter
+fi
